@@ -1,0 +1,118 @@
+# Stripe Integration TODO
+
+This file is the single source of truth for remaining Stripe setup. Scenario B applied: there were no existing Checkout Session calls, Stripe credentials, webhook handlers, or datastore patterns.
+
+## Restoration Setup (Next Action)
+
+The application now verifies payment with Stripe on the server, uploads only the cropped JPEG after approval, runs the same model as the iOS app (`flux-kontext-apps/restore-image`, input `input_image`), and shows the restored image with a download button. No photo is sent to the server before payment approval.
+
+Stripe test keys and `REPLICATE_API_TOKEN` are configured locally. These values are still missing:
+
+1. Create a **private** Vercel Blob store and connect it to this project. Add its `BLOB_READ_WRITE_TOKEN` to `.env.local` and the Vercel environment. A public store is not appropriate for these photos.
+2. Connect Upstash Redis through Vercel Marketplace. Add `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` to the same environments. No Supabase service is used.
+3. Restart the local development server. Checkout intentionally returns 503 until Stripe, Replicate, Blob and Redis are configured, to avoid accepting payments without restoration infrastructure.
+4. For production background completion, set `APP_URL` to the app's public HTTPS origin and `REPLICATE_WEBHOOK_SIGNING_SECRET` to the key returned by Replicate's `GET /v1/webhooks/default/secret` API, authenticated with your Replicate API token. This is **not** a Stripe signing secret. The app registers `/api/replicate/webhook` automatically on each prediction; do not enter this URL manually into Stripe. See [Replicate webhook verification](https://replicate.com/docs/topics/webhooks/verify-webhook/).
+5. In local development, leave the optional webhook values empty and keep the restoration page open: it polls the server. To test background completion locally, use a public HTTPS tunnel as `APP_URL` and configure the signing secret.
+
+Templates and code: [.env.example](.env.example), [paid-session.ts](app/_lib/paid-session.ts), [restoration.ts](app/_lib/restoration.ts), [restoration API](app/api/restorations/[id]/route.ts), [private result API](app/api/restorations/[id]/image/route.ts), [Replicate webhook](app/api/replicate/webhook/route.ts).
+
+### Privacy and Recovery
+
+- Before payment, the cropped JPEG and Checkout Session credentials stay in this browser's IndexedDB. Stripe receives payment details through its own form, not the image. Clear browser storage to delete this local recovery record.
+- After server-verified payment approval, the cropped JPEG goes to private Blob storage and then Replicate. The uncropped upload is never sent. Orders are keyed by Stripe Session ID in Redis; the email collected by Stripe is saved with the order.
+- Reloading `/restore` in the same browser resumes the saved session or paid order. Redirect payment methods also return here. The page does not automatically create a replacement charge for a submitted payment.
+- If the browser's local data is deleted **before the paid photo is uploaded**, it cannot be recovered automatically. There is deliberately no pre-payment server image storage. Add a support/re-upload flow before launch.
+- Duplicate requests use a distributed lock. Ambiguous prediction-creation failures become `needs_attention` instead of submitting a potentially duplicate billable prediction. Resolve these manually using the order ID.
+- Blob images and Redis orders currently have no automatic deletion policy. Configure a retention and cleanup process before production; do not assume Redis expiration deletes Blob files.
+- A verified Replicate webhook saves the result even if the browser closes after submission. Without a configured webhook, returning to the page resumes polling and saves the result. Prediction output can expire, so production webhooks are required.
+- Email delivery is not implemented yet. The current delivery is preview/download in the same browser.
+
+## Values to Replace
+
+Files containing placeholders:
+
+- [Environment template](.env.example)
+
+| Field | Current value | What to set |
+| --- | --- | --- |
+| `mode` | `payment` | This sample value already matches the product: one-time photo restoration. Keep `payment`; do not use `subscription`. |
+| `NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY` | `pk_test_...` | Your sandbox publishable key. Only this key is available to the browser. |
+| `STRIPE_SECRET_KEY` | `sk_test_...` | Your server API key, or a restricted `rk_test_...` key with Checkout permissions. Never expose it to the browser or commit it. |
+
+The environment template intentionally keeps placeholder keys. The local keys have been configured by the user; keep real values in `.env.local` and Vercel, never in this document. The endpoint returns HTTP 503 while its server key is missing or a placeholder. No amount or Price ID is accepted from the browser.
+
+## Configured Parameters
+
+Files containing Checkout Studio parameters:
+
+- [Checkout API route](app/api/create-checkout-session/route.ts)
+- [Embedded form](app/_components/restore/stripe-checkout.tsx)
+- [Stripe.js script](app/layout.tsx)
+
+| Parameter | Value |
+| --- | --- |
+| `line_items[].price` | `price_1UMAxvIq2iVVFbtuoqNAcjAx` (quantity: 1) |
+| `ui_mode` | `form` (installed `stripe` SDK: 23.0.0, which is above 21.0.0) |
+| `billing_address_collection` | `auto` |
+| `phone_number_collection` | `{ enabled: false }` |
+| `automatic_tax` | `{ enabled: false }` |
+| `submit_type` | `auto` |
+| `integration_identifier` | `custom_embedded_web_0001` |
+| `payment_method_collection` | Omitted for `mode: payment`, as required by rule 8. Its configured `always` value applies only if the product becomes a subscription. |
+| Server API version | `2026-03-25.dahlia; custom_checkout_payment_form_preview=v1` |
+| Stripe.js URL | `https://js.stripe.com/dahlia/stripe.js`, loaded directly in the HTML head |
+| Browser beta | `custom_checkout_payment_form_1` |
+| Form layout | `expanded` |
+
+The appearance matches the provided Checkout Studio settings: Stripe theme, automatic labels, spaced inputs, 4px borders, Inter font, 16px base size, and the supplied colors. The `@stripe/stripe-js` dependency supplies TypeScript types only; Stripe.js is not bundled or self-hosted. The server's API-version type assertion accommodates the required preview flag; it does not change the version sent to Stripe.
+
+## Setup and Next Steps
+
+1. Create your Stripe account and a sandbox. Make sure your account has access to the Checkout Form preview. If the API version or beta is rejected, contact Stripe support; do not silently remove the flags or switch integration types.
+2. The supplied Price ID is configured in the API route. Verify it belongs to the same Stripe account and environment as the keys and represents a one-time restoration.
+3. Local API keys have been configured by the user. Next.js loads `.env.local` automatically; restart the dev server after changing keys. [.env.example](.env.example) lists the required names for other environments.
+4. The dependencies `stripe` and `@stripe/stripe-js` are installed and recorded in `package.json` and `pnpm-lock.yaml`. Install from the lockfile when setting up another machine.
+5. Set the same variable names in Vercel. Use sandbox keys for Development/Preview and live keys only after the remaining delivery work is complete. Rebuild after changing the publishable key because Next.js embeds public environment variables at build time. Test and live Prices are separate resources.
+6. Test the checkout as described below. Activate the account and complete verification before accepting real payments.
+
+### New Files
+
+- `app/api/create-checkout-session/route.ts`: POST endpoint creating a session and returning `{ client_secret }` as JSON.
+- `app/_components/restore/stripe-checkout.tsx`: embedded form, loading/errors/retry, confirmation, and cleanup.
+- `.env.example`: environment-variable template.
+- `STRIPE_INTEGRATION_TODO.md`: setup and remaining work.
+
+### Flow
+
+Photo selection -> local perspective-corrected crop -> embedded Stripe form -> email/payment details -> SDK confirmation -> server checks `payment_status: paid` and the expected Price -> cropped JPEG upload -> private Blob + Redis order -> Replicate prediction -> verified webhook or polling -> private restored image -> preview/download.
+
+Session creation and payment verification stay on the server. The browser cannot choose the price or mark an order paid. The cropped photo remains local until approval; only then does the server accept it and start restoration. Checkout recovery uses IndexedDB on the same device.
+
+### Testing
+
+- Local configuration verified: both keys use the test environment, and the checkout endpoint successfully created a session with the configured Price ID and returned HTTP 200 with a client secret. No payment was submitted. End-to-end form confirmation remains to be tested.
+- Use sandbox keys and a sandbox Price. Do not use real card details in a sandbox.
+- Successful card: `4242 4242 4242 4242`.
+- Authentication card: `4000 0025 0000 3155`.
+- Declined card: `4000 0000 0000 9995`.
+- Use a future expiry date, any three-digit CVC, and any required billing details.
+- Check loading, unavailable configuration, retry, back navigation, validation errors, declined payments, and successful confirmation.
+- Verify exactly one session is created during React's development effect replay and that no iframe remains when leaving checkout.
+- Test refresh and redirect recovery on the same browser. Confirm unpaid sessions never upload images, declined cards do not start Replicate, and paid retries never create a second prediction.
+- Run `node --test tests/restoration.test.mjs` for mocked regression tests covering unpaid upload rejection, JPEG validation, session authorization, concurrent/duplicate fulfillment, ambiguous prediction creation, and webhook signatures. These tests do not charge Stripe or call Replicate.
+- Reference: [Stripe testing](https://docs.stripe.com/testing).
+
+### Required Before Selling Restorations
+
+- Complete the Blob/Redis setup and test an end-to-end **sandbox payment**. Stripe sandbox payments still trigger real billable Replicate predictions.
+- Configure production Replicate webhook delivery and verify successful, failed and repeated notifications.
+- Add Stripe payment-event tracking for abandoned/asynchronous checkouts and operational reconciliation. No Stripe webhook handler was added: restoration currently checks the paid state directly with Stripe and waits for the browser to upload the local photo after approval. A Stripe event alone cannot restore a photo that has not been uploaded.
+- Add support/re-upload, refunds, failure monitoring, rate limits, image retention/cleanup and email delivery before live sales.
+- Keep live payments disabled until these operational paths are ready. A new live Stripe Price ID is required when switching out of the sandbox.
+
+### Resources
+
+- [Stripe Support](https://support.stripe.com)
+- [Stripe MCP](https://docs.stripe.com/mcp)
+- [Stripe API keys](https://docs.stripe.com/keys)
+- [Checkout fulfillment](https://docs.stripe.com/checkout/fulfillment)
