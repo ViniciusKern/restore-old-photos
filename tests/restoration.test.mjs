@@ -27,6 +27,26 @@ test("photo upload is rejected before payment, without reading its body", async 
   assert.equal(advanced, 0);
 });
 
+test("readiness accepts Vercel Redis names and managed Blob authentication", () => {
+  const env = { REPLICATE_API_TOKEN: "test", KV_REST_API_URL: "https://redis.example", KV_REST_API_TOKEN: "write-token", BLOB_STORE_ID: "store_example", VERCEL: "1" };
+  const api = load("app/_lib/restoration.ts", {}, { process: { env } });
+  assert.equal(api.restorationReady(), true);
+  delete env.VERCEL;
+  assert.equal(api.restorationReady(), false);
+  env.VERCEL_OIDC_TOKEN = "local-managed-token";
+  assert.equal(api.restorationReady(), true);
+  delete env.VERCEL_OIDC_TOKEN;
+  env.BLOB_READ_WRITE_TOKEN = "local-static-token";
+  assert.equal(api.restorationReady(), true);
+  delete env.KV_REST_API_TOKEN;
+  env.KV_REST_API_READ_ONLY_TOKEN = "read-only-token";
+  assert.equal(api.restorationReady(), false);
+  env.UPSTASH_REDIS_REST_TOKEN = "write-token";
+  assert.equal(api.restorationReady(), true);
+  env.BLOB_READ_WRITE_TOKEN = "...";
+  assert.equal(api.restorationReady(), false);
+});
+
 test("paid upload rejects invalid JPEG before persistence", async () => {
   let advanced = 0;
   const route = load("app/api/restorations/[id]/route.ts", {

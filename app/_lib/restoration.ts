@@ -13,7 +13,16 @@ type Order = {
 type Prediction = { id: string; status: string; output?: string | string[] };
 const redis = () => Redis.fromEnv();
 const key = (id: string) => `restoration:${id}`;
-export const restorationReady = () => ["REPLICATE_API_TOKEN", "BLOB_READ_WRITE_TOKEN", "UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"].every(name => !!process.env[name] && !process.env[name]!.endsWith("..."));
+const configured = (value: string | undefined) => !!value?.trim() && !value.trim().endsWith("...");
+export function restorationReady() {
+  const env = process.env;
+  const redisReady = configured(env.UPSTASH_REDIS_REST_URL || env.KV_REST_API_URL)
+    && configured(env.UPSTASH_REDIS_REST_TOKEN || env.KV_REST_API_TOKEN);
+  // Vercel supplies OIDC at runtime; the Blob SDK handles credential resolution.
+  const blobReady = configured(env.BLOB_READ_WRITE_TOKEN)
+    || (configured(env.BLOB_STORE_ID) && (env.VERCEL === "1" || configured(env.VERCEL_OIDC_TOKEN)));
+  return configured(env.REPLICATE_API_TOKEN) && redisReady && blobReady;
+}
 export const readOrder = (id: string) => redis().get<Order>(key(id));
 export const predictionOrder = (id: string) => redis().get<string>(`restoration:prediction:${id}`);
 async function save(id: string, order: Order) {
