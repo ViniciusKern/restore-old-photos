@@ -16,6 +16,16 @@ export type CropQuad = {
   bottomLeft: CropPoint;
 };
 
+export function rotateCropQuadClockwise(quad: CropQuad): CropQuad {
+  const rotate = (point: CropPoint): CropPoint => ({ x: 1 - point.y, y: point.x });
+  return {
+    topLeft: rotate(quad.bottomLeft),
+    topRight: rotate(quad.topLeft),
+    bottomRight: rotate(quad.topRight),
+    bottomLeft: rotate(quad.bottomRight),
+  };
+}
+
 type CropHandle =
   | "topLeft"
   | "top"
@@ -59,6 +69,7 @@ export function PhotoCropper({
     event: ReactPointerEvent<HTMLButtonElement>,
     handle: CropHandle,
   ) {
+    if (isRotating) return;
     event.preventDefault();
     event.currentTarget.setPointerCapture(event.pointerId);
     setActiveHandle(handle);
@@ -66,7 +77,7 @@ export function PhotoCropper({
   }
 
   function handlePointerMove(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!activeHandle) {
+    if (!activeHandle || isRotating) {
       return;
     }
 

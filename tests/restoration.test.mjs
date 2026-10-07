@@ -9,7 +9,7 @@ import ts from "typescript";
 const require = createRequire(import.meta.url);
 function load(path, mocks = {}, globals = {}) {
   const source = readFileSync(new URL(`../${path}`, import.meta.url), "utf8");
-  const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
+  const code = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText;
   const testModule = { exports: {} };
   vm.runInNewContext(code, { module: testModule, exports: testModule.exports, require: name => mocks[name] ?? require(name), process: { env: {} }, Buffer, Headers, Request, Response, File, AbortSignal, URL, setTimeout, ...globals });
   return testModule.exports;
@@ -356,6 +356,22 @@ test("Replicate webhook rejects tampered signatures and stale timestamps", () =>
   assert.equal(api.verifyReplicateWebhook(raw, headers, secret), true);
   assert.equal(api.verifyReplicateWebhook(raw + " ", headers, secret), false);
   assert.equal(api.verifyReplicateWebhook(raw, headers, secret, Date.now() + 600_000), false);
+});
+
+test("clockwise rotation preserves an asymmetric crop and restores it after four turns", () => {
+  const { rotateCropQuadClockwise } = load("app/_components/restore/photo-cropper.tsx");
+  const quad = { topLeft: { x: .12, y: .2 }, topRight: { x: .78, y: .15 }, bottomRight: { x: .88, y: .7 }, bottomLeft: { x: .25, y: .82 } };
+  const original = structuredClone(quad);
+  const rotated = rotateCropQuadClockwise(quad);
+  const expected = { topLeft: { x: .18, y: .25 }, topRight: { x: .8, y: .12 }, bottomRight: { x: .85, y: .78 }, bottomLeft: { x: .3, y: .88 } };
+  function close(actual, expected) {
+    for (const corner of Object.keys(expected)) for (const axis of ["x", "y"]) assert.ok(Math.abs(actual[corner][axis] - expected[corner][axis]) < 1e-12);
+  }
+  close(rotated, expected);
+  let roundTrip = rotated;
+  for (let i = 0; i < 3; i++) roundTrip = rotateCropQuadClockwise(roundTrip);
+  close(roundTrip, quad);
+  assert.deepEqual(quad, original);
 });
 
 test("local crop exports only the selected area, not the full source photo", async () => {

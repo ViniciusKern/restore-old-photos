@@ -20,7 +20,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { CropQuad, PhotoCropper } from "./photo-cropper";
+import { CropQuad, PhotoCropper, rotateCropQuadClockwise } from "./photo-cropper";
 import { StripeCheckout } from "./stripe-checkout";
 import { FlowHeader } from "./flow-header";
 
@@ -193,10 +193,15 @@ export function RestorePhotoFlow() {
     setIsRotating(true);
 
     window.setTimeout(async () => {
-      const rotated = await rotateImageSource(imageSrc);
-      setImageSrc(rotated);
-      setCropQuad(standardCropQuad);
-      setIsRotating(false);
+      try {
+        const rotated = await rotateImageSource(imageSrc);
+        setImageSrc(rotated);
+        setCropQuad(rotateCropQuadClockwise);
+      } catch {
+        setPrepareError("We could not rotate your photo. Please try again.");
+      } finally {
+        setIsRotating(false);
+      }
     }, 230);
   }
 
@@ -248,7 +253,7 @@ export function RestorePhotoFlow() {
             onCamera={takeAnotherPhoto}
             onContinue={prepareCheckout}
             onCropChange={(quad) => {
-              if (!isPreparing) setCropQuad(quad);
+              if (!isPreparing && !isRotating) setCropQuad(quad);
             }}
             onRotate={rotatePhotoClockwise}
             onUpload={replaceWithUpload}
@@ -497,10 +502,10 @@ function CropStep({
 
         <div className="mt-5 grid gap-3 rounded-lg border border-[#e2e5e8] bg-white/95 p-3 shadow-[0_8px_24px_rgba(24,35,45,0.08)] backdrop-blur md:sticky md:bottom-4 md:grid-cols-[1fr_auto] md:items-center">
           <div className="grid grid-cols-2 gap-2 md:flex">
-            <ToolButton disabled={isPreparing} onClick={onUpload}>
+            <ToolButton disabled={isPreparing || isRotating} onClick={onUpload}>
               <Upload aria-hidden="true" /> Replace photo
             </ToolButton>
-            <ToolButton disabled={isPreparing} onClick={onCamera}>
+            <ToolButton disabled={isPreparing || isRotating} onClick={onCamera}>
               <Camera aria-hidden="true" /> Retake photo
             </ToolButton>
           </div>
