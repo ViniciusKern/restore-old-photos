@@ -35,7 +35,7 @@ export const steps = [
   {
     number: "04",
     title: "Download your restored photo",
-    body: "Once AI finishes restoring your photo, download the result using the link sent to your email.",
+    body: "Once AI finishes restoring your photo, download the result.",
   },
 ];
 
@@ -64,11 +64,6 @@ export const faqs = [
     question: "Do I need an account?",
     answer:
       "No account is required. At checkout, you provide an email address to receive the download link for your restored photo.",
-  },
-  {
-    question: "When do I pay?",
-    answer:
-      "You review and crop your photo first, then pay before restoration begins. Each payment covers one photo, with no subscription.",
   },
   {
     question: "Can I use a phone photo of an old print?",

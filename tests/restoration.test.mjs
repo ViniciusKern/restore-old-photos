@@ -62,17 +62,97 @@ test("paid upload rejects invalid JPEG before persistence", async () => {
 
 test("session authorization checks secret, price and quantity", async () => {
   let price = "price_1UMAxvIq2iVVFbtuoqNAcjAx", quantity = 1;
+  let stripeSecret = "secret";
+  const credentials = new Map();
+  const access = load("app/_lib/checkout-access.ts", {
+    "@upstash/redis": { Redis: { fromEnv: () => ({ get: async k => credentials.get(k), set: async (k, v) => credentials.set(k, v) }) } },
+  });
   class Stripe {
-    checkout = { sessions: { retrieve: async () => ({ client_secret: "secret", mode: "payment", line_items: { data: [{ price: { id: price }, quantity }] } }) } };
+    checkout = { sessions: { retrieve: async () => ({ client_secret: stripeSecret, mode: "payment", line_items: { data: [{ price: { id: price }, quantity }] } }) } };
   }
-  const api = load("app/_lib/paid-session.ts", { stripe: Stripe });
+  const api = load("app/_lib/paid-session.ts", { stripe: Stripe, "./checkout-access": access });
   const request = new Request("http://localhost", { headers: { Authorization: "Bearer secret" } });
   assert.ok(await api.authorizedSession("cs_test_order", request));
+  stripeSecret = null;
+  assert.ok(await api.authorizedSession("cs_test_order", request), "Completed sessions remain authorized with their original secret hash");
   assert.equal(await api.authorizedSession("cs_test_order", new Request("http://localhost", { headers: { Authorization: "Bearer wrong" } })), null);
   price = "price_wrong";
   assert.equal(await api.authorizedSession("cs_test_order", request), null);
   price = "price_1UMAxvIq2iVVFbtuoqNAcjAx"; quantity = 2;
   assert.equal(await api.authorizedSession("cs_test_order", request), null);
+  quantity = 1;
+  credentials.clear();
+  assert.equal(await api.authorizedSession("cs_test_order", request), null, "Never authorize a completed session without proof of ownership");
+});
+
+test("checkout status verifies a completed payment without a Stripe client_secret", async () => {
+  const route = load("app/api/checkout-status/[id]/route.ts", {
+    "@/app/_lib/paid-session": { authorizedSession: async () => ({ client_secret: null, status: "complete", payment_status: "paid" }) },
+  }, { process: { env: { STRIPE_SECRET_KEY: "test" } } });
+  const result = await route.GET(new Request("http://localhost", { headers: { Authorization: "Bearer original-secret" } }), { params: Promise.resolve({ id: "cs_test_order" }) });
+  assert.equal(result.status, 200);
+  assert.equal((await result.json()).status, "approved");
+});
+
+test("new checkouts return a UUID bound to the Stripe session", async () => {
+  const { isRestorationId } = load("app/_lib/restoration-id.ts");
+  let params, remembered;
+  class Stripe {
+    checkout = { sessions: { create: async p => { params = p; return { id: "cs_test_new", client_secret: "new-secret" }; } } };
+  }
+  const route = load("app/api/create-checkout-session/route.ts", {
+    stripe: Stripe,
+    "@/app/_lib/restoration": { restorationReady: () => true },
+    "@/app/_lib/checkout-access": { rememberCheckoutAccess: async (...args) => { remembered = args; } },
+  }, { process: { env: { STRIPE_SECRET_KEY: "test" } } });
+  const first = await (await route.POST()).json();
+  assert.equal(isRestorationId(first.restoration_id), true);
+  assert.equal(params.client_reference_id, first.restoration_id);
+  assert.equal(first.session_id, "cs_test_new");
+  assert.equal(remembered[0], "cs_test_new");
+  assert.equal(remembered[1], "new-secret");
+  const second = await (await route.POST()).json();
+  assert.notEqual(first.restoration_id, second.restoration_id);
+});
+
+test("browser recovery is isolated by UUID and ignores the old global active checkout", async () => {
+  const ids = ["a5f1c792-a5f2-4baa-a0ee-66d3b83bb1a0", "cf76137d-0399-4656-a084-7588084a056d", "dc3c6139-49da-4cdb-9376-9a9ec428f677"];
+  const stores = new Map([["checkout", new Map([["active", { sessionId: "old-session" }]])]]);
+  const db = {
+    objectStoreNames: { contains: name => stores.has(name) },
+    createObjectStore: name => stores.set(name, new Map()),
+    close: () => {},
+    transaction: name => {
+      const data = stores.get(name);
+      const transaction = { objectStore: () => ({
+        get: id => ({ result: data.get(id) }),
+        put: (value, id) => { data.set(id, value); return {}; },
+      }) };
+      setTimeout(() => transaction.oncomplete(), 0);
+      return transaction;
+    },
+  };
+  const api = load("app/_components/restore/local-checkout.ts", {
+    "@/app/_lib/restoration-id": load("app/_lib/restoration-id.ts"),
+  }, {
+    indexedDB: { open: (_, version) => {
+      assert.equal(version, 2);
+      const request = { result: db };
+      setTimeout(() => { request.onupgradeneeded(); request.onsuccess(); }, 0);
+      return request;
+    } },
+  });
+  const first = { restorationId: ids[0], sessionId: "first-session", clientSecret: "first-secret", croppedPhoto: new Blob(["first-photo"]) };
+  const second = { restorationId: ids[1], sessionId: "second-session", clientSecret: "second-secret", croppedPhoto: new Blob(["second-photo"]) };
+  await api.saveCheckout(first);
+  await api.saveCheckout(second);
+  assert.equal((await api.readCheckout(ids[0])).sessionId, first.sessionId);
+  assert.equal((await api.readCheckout(ids[1])).clientSecret, second.clientSecret);
+  assert.equal(await api.readCheckout(ids[2]), undefined);
+  stores.get("orders").set(ids[2], first);
+  assert.equal(await api.readCheckout(ids[2]), undefined, "Wrong-order records are never resumed");
+  await assert.rejects(api.readCheckout("active"), /Invalid restoration link/);
+  assert.ok(stores.get("checkout").has("active"), "Legacy data is not destroyed");
 });
 
 function restorationFixture({ failStart = false } = {}) {

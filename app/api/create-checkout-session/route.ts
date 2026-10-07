@@ -1,5 +1,7 @@
 import Stripe from "stripe";
+import { randomUUID } from "node:crypto";
 import { restorationReady } from "@/app/_lib/restoration";
+import { rememberCheckoutAccess } from "@/app/_lib/checkout-access";
 
 export async function POST() {
   const secretKey = process.env.STRIPE_SECRET_KEY;
@@ -18,7 +20,9 @@ export async function POST() {
   });
 
   try {
+    const restorationId = randomUUID();
     const session = await stripe.checkout.sessions.create({
+      client_reference_id: restorationId,
       ui_mode: "form",
       mode: "payment",
       billing_address_collection: "auto",
@@ -36,8 +40,10 @@ export async function POST() {
       );
     }
 
+    await rememberCheckoutAccess(session.id, session.client_secret);
+
     return Response.json(
-      { client_secret: session.client_secret },
+      { client_secret: session.client_secret, session_id: session.id, restoration_id: restorationId },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch {

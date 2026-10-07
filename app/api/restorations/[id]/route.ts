@@ -20,7 +20,7 @@ export async function POST(request: Request, { params }: Context) {
       if (signature[0] !== 255 || signature[1] !== 216 || signature[2] !== 255) return Response.json({ error: "Invalid photo." }, { status: 400 });
       croppedImage = file;
     }
-    const order = await advanceRestoration(id, croppedImage, session.customer_details?.email || null);
+    const order = await advanceRestoration(id, croppedImage, session.customer_details?.email || null, session.client_reference_id || undefined);
     return Response.json({ status: order?.status || "awaiting_photo" }, { headers: { "Cache-Control": "no-store" } });
   } catch {
     return Response.json({ error: "We could not check your restoration. Please try again; you will not be charged again." }, { status: 503 });

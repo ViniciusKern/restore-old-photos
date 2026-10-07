@@ -3,6 +3,7 @@ import { Redis } from "@upstash/redis";
 import { get, put } from "@vercel/blob";
 
 type Order = {
+  restorationId?: string;
   status: "stored" | "starting" | "processing" | "complete" | "failed" | "needs_attention";
   croppedImageUrl: string;
   predictionId?: string;
@@ -46,7 +47,7 @@ async function croppedBytes(url: string) {
 }
 
 // Callers must verify the session is paid before providing any photo or starting work.
-export async function advanceRestoration(id: string, croppedImage?: File, email: string | null = null) {
+export async function advanceRestoration(id: string, croppedImage?: File, email: string | null = null, restorationId?: string) {
   const db = redis(), lockKey = `${key(id)}:lock`, lock = randomUUID();
   if (!await db.set(lockKey, lock, { nx: true, ex: 120 })) return readOrder(id);
   try {
@@ -54,7 +55,7 @@ export async function advanceRestoration(id: string, croppedImage?: File, email:
     if (!order) {
       if (!croppedImage) return null;
       const stored = await put(`restorations/${id}/cropped.jpg`, croppedImage, { access: "private", contentType: "image/jpeg", addRandomSuffix: false, allowOverwrite: true });
-      order = { status: "stored", croppedImageUrl: stored.url, email, updatedAt: Date.now() };
+      order = { status: "stored", restorationId, croppedImageUrl: stored.url, email, updatedAt: Date.now() };
       await save(id, order);
     }
     if (order.status === "complete" || order.status === "failed" || order.status === "needs_attention") return order;

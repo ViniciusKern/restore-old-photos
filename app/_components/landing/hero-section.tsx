@@ -31,7 +31,7 @@ export function HeroSection() {
               className="h-4 w-4 shrink-0 text-[#267369]"
               aria-hidden="true"
             />
-            Pay per photo. No subscription or account required.
+            No subscription or account required.
           </p>
         </div>
 

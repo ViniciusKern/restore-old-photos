@@ -1,8 +1,17 @@
 "use client";
 
 import Image from "next/image";
-import Link from "next/link";
-import { ArrowLeft, ArrowRight, Camera, Check, Crop, ImagePlus, LoaderCircle, RotateCw, Upload, UserRound, CreditCard } from "lucide-react";
+import {
+  ArrowRight,
+  Camera,
+  Check,
+  Crop,
+  ImagePlus,
+  LoaderCircle,
+  RotateCw,
+  Upload,
+  UserRound,
+} from "lucide-react";
 import {
   ChangeEvent,
   ReactNode,
@@ -13,7 +22,7 @@ import {
 } from "react";
 import { CropQuad, PhotoCropper } from "./photo-cropper";
 import { StripeCheckout } from "./stripe-checkout";
-import { localCheckout } from "./local-checkout";
+import { FlowHeader } from "./flow-header";
 
 const standardCropQuad: CropQuad = {
   topLeft: { x: 0.08, y: 0.08 },
@@ -40,14 +49,6 @@ export function RestorePhotoFlow() {
   const [isPreparing, setIsPreparing] = useState(false);
   const [prepareError, setPrepareError] = useState("");
 
-  useEffect(() => {
-    let cancelled = false;
-    localCheckout().then(saved => {
-      if (saved && !cancelled) { setCroppedPhoto(saved.croppedPhoto); setStep("checkout"); }
-    }).catch(() => {});
-    return () => { cancelled = true; };
-  }, []);
-
   async function prepareCheckout() {
     if (!imageSrc || isPreparing) return;
     setIsPreparing(true);
@@ -57,8 +58,14 @@ export function RestorePhotoFlow() {
       setCroppedPhoto(await cropPhoto(imageSrc, cropQuad));
       setStep("checkout");
     } catch (error) {
-      setPrepareError(error instanceof Error ? error.message : "We could not prepare your photo.");
-    } finally { setIsPreparing(false); }
+      setPrepareError(
+        error instanceof Error
+          ? error.message
+          : "We could not prepare your photo.",
+      );
+    } finally {
+      setIsPreparing(false);
+    }
   }
 
   function stopCameraStream() {
@@ -77,7 +84,9 @@ export function RestorePhotoFlow() {
     async function startCamera() {
       if (!navigator.mediaDevices?.getUserMedia) {
         setCameraStatus("error");
-        setCameraError("This browser cannot access your camera. Choose a saved photo or try your device's camera.");
+        setCameraError(
+          "This browser cannot access your camera. Choose a saved photo or try your device's camera.",
+        );
         return;
       }
 
@@ -224,7 +233,6 @@ export function RestorePhotoFlow() {
             cameraError={cameraError}
             cameraFallbackInputRef={cameraFallbackInputRef}
             cameraStatus={cameraStatus}
-            onBack={() => setStep("select")}
             onCapture={capturePhoto}
             onUpload={replaceWithUpload}
             videoRef={videoRef}
@@ -239,13 +247,24 @@ export function RestorePhotoFlow() {
             isPreparing={isPreparing}
             onCamera={takeAnotherPhoto}
             onContinue={prepareCheckout}
-            onCropChange={quad => { if (!isPreparing) setCropQuad(quad); }}
+            onCropChange={(quad) => {
+              if (!isPreparing) setCropQuad(quad);
+            }}
             onRotate={rotatePhotoClockwise}
             onUpload={replaceWithUpload}
           />
         ) : null}
-        {prepareError ? <p role="alert" className="text-center text-sm text-red-700">{prepareError}</p> : null}
-        {step === "checkout" && croppedPhoto ? <StripeCheckout croppedPhoto={croppedPhoto} onRestart={() => { setCroppedPhoto(null); setImageSrc(null); setStep("select"); }} onBack={() => { void localCheckout(null); setStep(imageSrc ? "crop" : "select"); }} /> : null}
+        {prepareError ? (
+          <p role="alert" className="text-center text-sm text-red-700">
+            {prepareError}
+          </p>
+        ) : null}
+        {step === "checkout" && croppedPhoto ? (
+          <StripeCheckout
+            croppedPhoto={croppedPhoto}
+            onBack={() => setStep("crop")}
+          />
+        ) : null}
       </div>
     </main>
   );
@@ -261,13 +280,13 @@ function SelectPhotoStep({
   return (
     <section className="restore-panel-in mx-auto grid w-full max-w-5xl flex-1 content-center gap-10 py-10 lg:grid-cols-[1fr_0.9fr] lg:items-center lg:gap-20 lg:py-16">
       <div className="max-w-lg">
-        <p className="flex items-center gap-2 text-sm font-medium text-[#267369]"><ImagePlus className="h-4 w-4" aria-hidden="true" /> Select your photo</p>
-        <h1 className="mt-4 text-3xl font-semibold leading-tight sm:text-4xl">
-          Choose a photo to restore
-        </h1>
+        <p className="flex items-center gap-2 text-sm font-medium text-[#267369]">
+          <ImagePlus className="h-4 w-4" aria-hidden="true" /> Choose a photo to
+          restore
+        </p>
         <p className="mt-4 text-base leading-7 text-[#677078]">
-          Choose a saved photo or scan, or take a picture of an old print.
-          You can adjust the crop before continuing.
+          Choose a saved photo or scan, or take a picture of an old print. You
+          can adjust the crop before continuing.
         </p>
 
         <div className="mt-7 space-y-3">
@@ -286,21 +305,42 @@ function SelectPhotoStep({
           />
         </div>
         <div className="mt-6 flex flex-wrap gap-x-6 gap-y-2 text-xs text-[#677078]">
-          <span className="flex items-center gap-1.5"><UserRound className="h-3.5 w-3.5" aria-hidden="true" /> No account required</span>
-          <span className="flex items-center gap-1.5"><Check className="h-3.5 w-3.5 text-[#267369]" aria-hidden="true" /> No charge at this step</span>
+          <span className="flex items-center gap-1.5">
+            <UserRound className="h-3.5 w-3.5" aria-hidden="true" /> No account
+            required
+          </span>
         </div>
       </div>
 
-      <figure className="mx-auto w-full max-w-sm lg:max-w-none">
+      <figure className="mx-auto hidden w-full max-w-sm md:block lg:max-w-none">
         <div className="relative aspect-[4/5] overflow-hidden rounded-lg bg-[#e2e5e8] shadow-[0_12px_30px_rgba(24,35,45,0.10)]">
-          <Image alt="Restored wedding portrait" className="object-cover" fill sizes="(min-width: 1024px) 420px, 90vw" src="/photo-after.jpg" />
+          <Image
+            alt="Restored wedding portrait"
+            className="object-cover"
+            fill
+            sizes="(min-width: 1024px) 420px, 90vw"
+            src="/photo-after.jpg"
+          />
           <div className="absolute inset-0 w-1/2 overflow-hidden border-r-2 border-white">
-            <Image alt="Original damaged wedding portrait" className="h-full max-w-none object-cover" height={1402} src="/photo-before.png" width={1122} style={{ width: "200%" }} />
+            <Image
+              alt="Original damaged wedding portrait"
+              className="h-full max-w-none object-cover"
+              height={1402}
+              src="/photo-before.png"
+              width={1122}
+              style={{ width: "200%" }}
+            />
           </div>
-          <span className="absolute bottom-3 left-3 rounded bg-black/65 px-2.5 py-1 text-xs font-medium text-white">Before</span>
-          <span className="absolute bottom-3 right-3 rounded bg-white/90 px-2.5 py-1 text-xs font-medium text-[#242729]">After</span>
+          <span className="absolute bottom-3 left-3 rounded bg-black/65 px-2.5 py-1 text-xs font-medium text-white">
+            Before
+          </span>
+          <span className="absolute bottom-3 right-3 rounded bg-white/90 px-2.5 py-1 text-xs font-medium text-[#242729]">
+            After
+          </span>
         </div>
-        <figcaption className="mt-3 text-center text-xs text-[#677078]">Restoration example</figcaption>
+        <figcaption className="mt-3 text-center text-xs text-[#677078]">
+          Restoration example
+        </figcaption>
       </figure>
     </section>
   );
@@ -310,7 +350,6 @@ function CameraStep({
   cameraError,
   cameraFallbackInputRef,
   cameraStatus,
-  onBack,
   onCapture,
   onUpload,
   videoRef,
@@ -318,7 +357,6 @@ function CameraStep({
   cameraError: string;
   cameraFallbackInputRef: RefObject<HTMLInputElement | null>;
   cameraStatus: CameraStatus;
-  onBack: () => void;
   onCapture: () => void;
   onUpload: () => void;
   videoRef: RefObject<HTMLVideoElement | null>;
@@ -362,15 +400,10 @@ function CameraStep({
         </div>
 
         <div className="py-5 lg:pl-2">
-          <p className="text-sm font-medium text-[#267369]">
-            Camera
-          </p>
-          <h1 className="mt-3 text-3xl font-semibold leading-tight">
-            Photograph your old print
-          </h1>
+          <p className="text-sm font-medium text-[#267369]">Camera</p>
           <p className="mt-4 text-sm leading-6 text-[#6e625d]">
-            Place the print flat in even light and avoid glare.
-            Include the whole photo in the frame.
+            Place the print flat in even light and avoid glare. Include the
+            whole photo in the frame.
           </p>
 
           <div className="mt-7 grid gap-3">
@@ -380,9 +413,20 @@ function CameraStep({
               onClick={onCapture}
               type="button"
             >
-              {cameraStatus === "starting" ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : <Camera aria-hidden="true" />}
-              {cameraStatus === "starting" ? "Starting camera..." : "Capture photo"}
+              {cameraStatus === "starting" ? (
+                <LoaderCircle className="animate-spin" aria-hidden="true" />
+              ) : (
+                <Camera aria-hidden="true" />
+              )}
+              {cameraStatus === "starting"
+                ? "Starting camera..."
+                : "Capture photo"}
             </button>
+            <div className="flex items-center gap-3 py-1 text-xs text-[#677078]">
+              <span className="h-px flex-1 bg-[#e2e5e8]" aria-hidden="true" />
+              <span>OR</span>
+              <span className="h-px flex-1 bg-[#e2e5e8]" aria-hidden="true" />
+            </div>
             <button
               className="button-secondary"
               onClick={onUpload}
@@ -390,14 +434,6 @@ function CameraStep({
             >
               <Upload aria-hidden="true" />
               Upload a photo
-            </button>
-            <button
-              className="button-quiet"
-              onClick={onBack}
-              type="button"
-            >
-              <ArrowLeft aria-hidden="true" />
-              Back to photo selection
             </button>
           </div>
         </div>
@@ -432,17 +468,20 @@ function CropStep({
       <div className="mx-auto w-full max-w-6xl">
         <div className="mb-5 flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
           <div>
-            <p className="flex items-center gap-2 text-sm font-medium text-[#267369]"><Crop className="h-4 w-4" aria-hidden="true" /> Adjust your photo</p>
-            <h1 className="mt-2 text-3xl font-semibold leading-tight md:text-4xl">
-              Crop your photo
-            </h1>
+            <p className="flex items-center gap-2 text-sm font-medium text-[#267369]">
+              <Crop className="h-4 w-4" aria-hidden="true" /> Crop your photo
+            </p>
             <p className="mt-2 max-w-2xl text-sm font-semibold leading-6 text-[#6e625d]">
               Select the area you want restored.
             </p>
           </div>
 
           <div className="flex gap-2">
-            <ToolButton disabled={isRotating || isPreparing} onClick={onRotate} label="Rotate clockwise">
+            <ToolButton
+              disabled={isRotating || isPreparing}
+              onClick={onRotate}
+              label="Rotate clockwise"
+            >
               <RotateCw aria-hidden="true" />
               Rotate
             </ToolButton>
@@ -458,8 +497,12 @@ function CropStep({
 
         <div className="mt-5 grid gap-3 rounded-lg border border-[#e2e5e8] bg-white/95 p-3 shadow-[0_8px_24px_rgba(24,35,45,0.08)] backdrop-blur md:sticky md:bottom-4 md:grid-cols-[1fr_auto] md:items-center">
           <div className="grid grid-cols-2 gap-2 md:flex">
-            <ToolButton disabled={isPreparing} onClick={onUpload}><Upload aria-hidden="true" /> Replace photo</ToolButton>
-            <ToolButton disabled={isPreparing} onClick={onCamera}><Camera aria-hidden="true" /> Retake photo</ToolButton>
+            <ToolButton disabled={isPreparing} onClick={onUpload}>
+              <Upload aria-hidden="true" /> Replace photo
+            </ToolButton>
+            <ToolButton disabled={isPreparing} onClick={onCamera}>
+              <Camera aria-hidden="true" /> Retake photo
+            </ToolButton>
           </div>
 
           <button
@@ -469,10 +512,13 @@ function CropStep({
             type="button"
           >
             {isPreparing ? "Preparing photo..." : "Continue"}
-            {isPreparing ? <LoaderCircle className="animate-spin" aria-hidden="true" /> : <ArrowRight aria-hidden="true" />}
+            {isPreparing ? (
+              <LoaderCircle className="animate-spin" aria-hidden="true" />
+            ) : (
+              <ArrowRight aria-hidden="true" />
+            )}
           </button>
         </div>
-
       </div>
     </section>
   );
@@ -499,72 +545,18 @@ function SourceOptionButton({
         {icon}
       </span>
       <span>
-        <span className="block text-base font-semibold text-[#242729]">{title}</span>
+        <span className="block text-base font-semibold text-[#242729]">
+          {title}
+        </span>
         <span className="mt-1 block text-sm leading-5 text-[#677078]">
           {description}
         </span>
       </span>
-      <ArrowRight className="h-4 w-4 text-[#9aa2a8] transition group-hover:text-[#d84b38]" aria-hidden="true" />
+      <ArrowRight
+        className="h-4 w-4 text-[#9aa2a8] transition group-hover:text-[#d84b38]"
+        aria-hidden="true"
+      />
     </button>
-  );
-}
-
-function FlowHeader({
-  step,
-}: {
-  step: FlowStep;
-}) {
-  const currentStep = step === "checkout" ? 3 : step === "crop" ? 2 : 1;
-
-  return (
-    <header className="sticky top-3 z-30">
-      <div className="mx-auto grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 border-b border-[#e2e5e8] bg-[#f8f9fa]/95 px-1 py-3 backdrop-blur-xl">
-        <Link
-          aria-label="Back to Restore Old Photos home"
-          className="flex min-w-0 items-center gap-3 justify-self-start"
-          href="/"
-        >
-          <Image
-            alt=""
-            className="h-9 w-9 rounded-lg object-cover shadow-[0_6px_14px_rgba(35,23,21,0.12)]"
-            height={36}
-            priority
-            src="/app-icon.jpg"
-            width={36}
-          />
-          <span className="hidden text-sm font-semibold sm:block">
-            Restore Old Photos
-          </span>
-        </Link>
-
-        <div className="hidden items-center gap-2 text-xs font-medium text-[#9a8f89] md:flex" aria-label={`Step ${currentStep} of 3`}>
-          <ProgressStep active={currentStep >= 1}><ImagePlus className="h-3.5 w-3.5" aria-hidden="true" /> Photo</ProgressStep>
-          <span className="h-px w-8 bg-[#e8dfdb]" />
-          <ProgressStep active={currentStep >= 2}><Crop className="h-3.5 w-3.5" aria-hidden="true" /> Crop</ProgressStep>
-          <span className="h-px w-8 bg-[#e8dfdb]" />
-          <ProgressStep active={currentStep >= 3}><CreditCard className="h-3.5 w-3.5" aria-hidden="true" /> Checkout</ProgressStep>
-        </div>
-
-      </div>
-    </header>
-  );
-}
-
-function ProgressStep({
-  active,
-  children,
-}: {
-  active: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <span
-      className={`inline-flex items-center gap-1.5 px-2 py-1.5 ${
-        active ? "text-[#267369]" : "text-[#9a8f89]"
-      }`}
-    >
-      {children}
-    </span>
   );
 }
 
@@ -590,7 +582,11 @@ function ToolButton({
       type="button"
     >
       {children}
-      {iconOnly && label ? <span className="control-tooltip" aria-hidden="true">{label}</span> : null}
+      {iconOnly && label ? (
+        <span className="control-tooltip" aria-hidden="true">
+          {label}
+        </span>
+      ) : null}
     </button>
   );
 }
