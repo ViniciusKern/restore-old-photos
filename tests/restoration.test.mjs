@@ -29,7 +29,7 @@ test("photo upload is rejected before payment, without reading its body", async 
 
 test("readiness accepts Vercel Redis names and managed Blob authentication", () => {
   const env = { REPLICATE_API_TOKEN: "test", KV_REST_API_URL: "https://redis.example", KV_REST_API_TOKEN: "write-token", BLOB_STORE_ID: "store_example", VERCEL: "1" };
-  const api = load("app/_lib/restoration.ts", {}, { process: { env } });
+  const api = load("app/_lib/restoration.ts", { "./restoration-email": { deliverRestorationEmail: async () => {} } }, { process: { env } });
   assert.equal(api.restorationReady(), true);
   delete env.VERCEL;
   assert.equal(api.restorationReady(), false);
@@ -155,7 +155,7 @@ test("browser recovery is isolated by UUID and ignores the old global active che
   assert.ok(stores.get("checkout").has("active"), "Legacy data is not destroyed");
 });
 
-function restorationFixture({ failStart = false } = {}) {
+function restorationFixture({ failStart = false, deliverEmail = async () => {} } = {}) {
   const values = new Map(), files = new Map();
   let starts = 0, completed = false;
   const db = {
@@ -167,6 +167,7 @@ function restorationFixture({ failStart = false } = {}) {
     eval: async (_, keys, args) => { if (values.get(keys[0]) === args[0]) values.delete(keys[0]); },
   };
   const api = load("app/_lib/restoration.ts", {
+    "./restoration-email": { deliverRestorationEmail: deliverEmail },
     "@upstash/redis": { Redis: { fromEnv: () => db } },
     "@vercel/blob": {
       put: async (path, body) => { files.set(path, body); return { url: path }; },
@@ -200,6 +201,142 @@ test("duplicate and concurrent requests start only one restoration using the cro
   assert.ok(f.files.has("restorations/order/result"));
   assert.equal((await f.api.advanceRestoration("order", photo)).status, "complete");
   assert.equal(f.starts(), 1);
+});
+
+test("emails are triggered only after a successful result has been persisted", async () => {
+  let notifications = 0;
+  const f = restorationFixture({ deliverEmail: async (_, order, persist) => {
+    assert.equal(order.status, "complete");
+    assert.ok(f.files.has(order.resultUrl));
+    if (order.emailDelivery?.sentAt) return;
+    notifications++;
+    order.emailDelivery = { sentAt: Date.now() };
+    await persist();
+  } });
+  const photo = new File([new Uint8Array([255, 216, 255]), "crop"], "cropped.jpg", { type: "image/jpeg" });
+  await f.api.advanceRestoration("order", photo);
+  assert.equal(notifications, 0);
+  f.complete();
+  await Promise.all([f.api.advanceRestoration("order"), f.api.advanceRestoration("order")]);
+  await f.api.advanceRestoration("order");
+  assert.equal(notifications, 1);
+  assert.equal(f.starts(), 1);
+});
+
+function emailFixture() {
+  const values = new Map(), requests = [];
+  let fail = false;
+  const env = { RESEND_API_KEY: "test-key", RESEND_FROM_EMAIL: "Restore Old Photos <photos@example.com>", APP_URL: "https://example.com" };
+  const api = load("app/_lib/restoration-email.ts", {
+    "@upstash/redis": { Redis: { fromEnv: () => ({ get: async k => values.get(k), set: async (k, v) => values.set(k, v) }) } },
+  }, {
+    process: { env },
+    fetch: async (url, options) => {
+      assert.equal(url, "https://api.resend.com/emails");
+      requests.push(options);
+      if (fail) throw new Error("Network timeout");
+      return Response.json({ id: "email-id" });
+    },
+  });
+  return { api, env, requests, values, fail: value => { fail = value; } };
+}
+
+test("Resend uses approved copy and a result-only expiring link without Stripe credentials", async () => {
+  const f = emailFixture();
+  const order = { status: "processing", email: "customer@example.com", resultUrl: "private-result" };
+  let persisted = false;
+  await f.api.deliverRestorationEmail("order", order, async () => { persisted = true; });
+  assert.equal(f.requests.length, 0);
+  order.status = "complete";
+  await f.api.deliverRestorationEmail("order", order, async () => { persisted = true; });
+  assert.ok(persisted);
+  assert.equal(f.requests.length, 1);
+  const payload = JSON.parse(f.requests[0].body);
+  assert.equal(payload.subject, "Your restored photo is ready");
+  assert.ok(payload.text.endsWith("Thank you."));
+  assert.ok(payload.html.includes("View and download your photo"));
+  assert.equal(payload.to[0], order.email);
+  assert.match(order.emailDelivery.token, /^[a-f0-9]{64}$/);
+  assert.equal(await f.api.emailLinkOrderId(order.emailDelivery.token), "order");
+  assert.equal(await f.api.emailLinkOrderId("order"), null);
+  assert.equal(f.api.emailLinkMatches(order, order.emailDelivery.token), true);
+  assert.equal(f.api.emailLinkMatches(order, "a".repeat(64)), false);
+  await f.api.deliverRestorationEmail("order", order, async () => {});
+  assert.equal(f.requests.length, 1);
+  order.emailDelivery.expiresAt = Date.now() - 1;
+  assert.equal(f.api.emailLinkMatches(order, order.emailDelivery.token), false);
+  assert.ok(!f.requests[0].body.includes("private-result"));
+});
+
+test("email retries preserve the request and idempotency key; old ambiguous sends stop", async () => {
+  const f = emailFixture();
+  const order = { status: "complete", email: "customer@example.com", resultUrl: "private-result" };
+  f.fail(true);
+  await assert.rejects(f.api.deliverRestorationEmail("order", order, async () => {}));
+  f.env.APP_URL = "https://changed.example.com";
+  f.env.RESEND_FROM_EMAIL = "other@example.com";
+  await assert.rejects(f.api.deliverRestorationEmail("order", order, async () => {}));
+  assert.equal(f.requests[0].body, f.requests[1].body);
+  assert.equal(f.requests[0].headers["Idempotency-Key"], f.requests[1].headers["Idempotency-Key"]);
+  order.emailDelivery.firstAttemptAt = Date.now() - 24 * 3600_000;
+  await f.api.deliverRestorationEmail("order", order, async () => {});
+  assert.equal(f.requests.length, 2);
+  assert.equal(order.emailDelivery.needsAttention, true);
+});
+
+test("email image endpoint rejects invalid links and streams private images without caching", async () => {
+  let order = null, blobReads = 0;
+  const route = load("app/api/email-photo/[token]/route.ts", {
+    "@/app/_lib/email-photo": { readEmailPhoto: async () => order },
+    "@vercel/blob": { get: async (_, options) => {
+      assert.equal(options.access, "private");
+      blobReads++;
+      return { statusCode: 200, blob: { contentType: "image/png" }, stream: new Response("photo").body };
+    } },
+  });
+  const params = { params: Promise.resolve({ token: "a".repeat(64) }) };
+  assert.equal((await route.GET(new Request("https://example.com"), params)).status, 404);
+  assert.equal(blobReads, 0);
+  order = { resultUrl: "private-result" };
+  const response = await route.GET(new Request("https://example.com?download"), params);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("Referrer-Policy"), "no-referrer");
+  assert.equal(response.headers.get("Cache-Control"), "private, no-store");
+  assert.match(response.headers.get("Content-Disposition"), /attachment.*restored-photo.png/);
+});
+
+test("email lookup requires the result's matching token, completed status and expiry", async () => {
+  let id = "order";
+  const token = "a".repeat(64);
+  const order = { status: "complete", resultUrl: "private-result", emailDelivery: { token, expiresAt: Date.now() + 60_000 } };
+  const email = load("app/_lib/restoration-email.ts");
+  const api = load("app/_lib/email-photo.ts", {
+    "./restoration": { readOrder: async () => order },
+    "./restoration-email": { emailLinkOrderId: async () => id, emailLinkMatches: email.emailLinkMatches },
+  });
+  assert.ok(await api.readEmailPhoto(token));
+  assert.equal(await api.readEmailPhoto("b".repeat(64)), null);
+  order.status = "processing";
+  assert.equal(await api.readEmailPhoto(token), null);
+  order.status = "complete";
+  order.emailDelivery.expiresAt = Date.now() - 1;
+  assert.equal(await api.readEmailPhoto(token), null);
+  id = null;
+  assert.equal(await api.readEmailPhoto(token), null);
+});
+
+test("Replicate webhook requests email retries without rerunning a completed restoration", async () => {
+  const result = { status: "complete", email: "customer@example.com", predictionId: "prediction1", emailDelivery: {} };
+  const route = load("app/api/replicate/webhook/route.ts", {
+    "@/app/_lib/replicate-signature": { verifyReplicateWebhook: () => true },
+    "@/app/_lib/restoration": { predictionOrder: async () => "order", readOrder: async () => result, advanceRestoration: async () => result },
+    "@/app/_lib/restoration-email": { restorationEmailConfigured: () => true },
+    "@/app/_lib/paid-session": { RESTORATION_PRICE: "price_test", stripeClient: () => ({ checkout: { sessions: { retrieve: async () => ({ payment_status: "paid", mode: "payment", line_items: { data: [{ price: { id: "price_test" }, quantity: 1 }] } }) } } }) },
+  }, { process: { env: { REPLICATE_WEBHOOK_SIGNING_SECRET: "test" } } });
+  const request = () => new Request("https://example.com", { method: "POST", body: JSON.stringify({ id: "prediction1" }) });
+  assert.equal((await route.POST(request())).status, 503);
+  result.emailDelivery.sentAt = Date.now();
+  assert.equal((await route.POST(request())).status, 204);
 });
 
 test("ambiguous prediction creation is not automatically retried", async () => {

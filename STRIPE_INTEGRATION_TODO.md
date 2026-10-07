@@ -26,7 +26,8 @@ Templates and code: [.env.example](.env.example), [paid-session.ts](app/_lib/pai
 - Duplicate requests use a distributed lock. Ambiguous prediction-creation failures become `needs_attention` instead of submitting a potentially duplicate billable prediction. Resolve these manually using the order ID.
 - Blob images and Redis orders currently have no automatic deletion policy. Configure a retention and cleanup process before production; do not assume Redis expiration deletes Blob files.
 - A verified Replicate webhook saves the result even if the browser closes after submission. Without a configured webhook, returning to the page resumes polling and saves the result. Prediction output can expire, so production webhooks are required.
-- Email delivery is not implemented yet. The current delivery is preview/download in the same browser.
+- Resend submits a transactional email after the private result is saved. Configure `RESEND_API_KEY`, `RESEND_FROM_EMAIL` (a verified sender) and `APP_URL` (the public HTTPS origin). The approved copy lives in [restoration-email.ts](app/_lib/restoration-email.ts). The email contains a random, result-only link valid for 30 days; anyone holding this link can view/download that result in any browser. It never grants checkout or original-photo access. Treat the URL as a credential and disable Resend click tracking for these emails.
+- Email submission is serialized by the order lock, recorded in Redis and deduplicated by Resend's idempotency key. Failed submissions retry via the Replicate webhook or a later order check; they do not hide the restored image or rerun Replicate. Ambiguous submissions older than 23 hours stop automatically (`emailDelivery.needsAttention`) for manual review because Resend's deduplication lasts 24 hours. A Resend message ID confirms acceptance, not inbox delivery; delivery/bounce monitoring is not implemented. Configure the production Replicate webhook so completion/email does not depend on an open browser. No email is sent if Resend configuration or the recipient is missing.
 
 ## Values to Replace
 
@@ -108,7 +109,7 @@ Session creation and payment verification stay on the server. The browser cannot
 - Complete the Blob/Redis setup and test an end-to-end **sandbox payment**. Stripe sandbox payments still trigger real billable Replicate predictions.
 - Configure production Replicate webhook delivery and verify successful, failed and repeated notifications.
 - Add Stripe payment-event tracking for abandoned/asynchronous checkouts and operational reconciliation. No Stripe webhook handler was added: restoration currently checks the paid state directly with Stripe and waits for the browser to upload the local photo after approval. A Stripe event alone cannot restore a photo that has not been uploaded.
-- Add support/re-upload, refunds, failure monitoring, rate limits, image retention/cleanup and email delivery before live sales.
+- Add support/re-upload, refunds, failure monitoring, rate limits, image retention/cleanup and email delivery/bounce monitoring before live sales.
 - Keep live payments disabled until these operational paths are ready. A new live Stripe Price ID is required when switching out of the sandbox.
 
 ### Resources

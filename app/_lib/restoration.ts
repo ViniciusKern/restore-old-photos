@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Redis } from "@upstash/redis";
 import { get, put } from "@vercel/blob";
+import { deliverRestorationEmail, type EmailDelivery } from "./restoration-email";
 
 type Order = {
   restorationId?: string;
@@ -9,6 +10,7 @@ type Order = {
   predictionId?: string;
   resultUrl?: string;
   email: string | null;
+  emailDelivery?: EmailDelivery;
   updatedAt: number;
 };
 type Prediction = { id: string; status: string; output?: string | string[] };
@@ -29,6 +31,15 @@ export const predictionOrder = (id: string) => redis().get<string>(`restoration:
 async function save(id: string, order: Order) {
   order.updatedAt = Date.now();
   await redis().set(key(id), order);
+}
+async function notifyCompletion(id: string, order: Order) {
+  try {
+    await deliverRestorationEmail(id, order, () => save(id, order));
+  } catch {
+    // Never expose provider details or hide an already completed restoration.
+    console.error("Restoration email submission failed; retry through webhook or order polling.");
+  }
+  return order;
 }
 async function replicate(path: string, body?: object): Promise<Prediction> {
   const response = await fetch(`https://api.replicate.com/v1/${path}`, {
@@ -58,7 +69,8 @@ export async function advanceRestoration(id: string, croppedImage?: File, email:
       order = { status: "stored", restorationId, croppedImageUrl: stored.url, email, updatedAt: Date.now() };
       await save(id, order);
     }
-    if (order.status === "complete" || order.status === "failed" || order.status === "needs_attention") return order;
+    if (order.status === "complete") return await notifyCompletion(id, order);
+    if (order.status === "failed" || order.status === "needs_attention") return order;
     if (!order.predictionId) {
       // A persisted start with no prediction ID is ambiguous: never charge Replicate twice.
       if (order.status === "starting") {
@@ -105,7 +117,7 @@ export async function advanceRestoration(id: string, croppedImage?: File, email:
       order.status = "complete";
     }
     await save(id, order);
-    return order;
+    return order.status === "complete" ? await notifyCompletion(id, order) : order;
   } finally {
     await db.eval("if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end", [lockKey], [lock]);
   }

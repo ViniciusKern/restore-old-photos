@@ -1,6 +1,7 @@
 import { verifyReplicateWebhook } from "@/app/_lib/replicate-signature";
 import { advanceRestoration, predictionOrder, readOrder } from "@/app/_lib/restoration";
 import { stripeClient, RESTORATION_PRICE } from "@/app/_lib/paid-session";
+import { restorationEmailConfigured } from "@/app/_lib/restoration-email";
 
 export const maxDuration = 60;
 export async function POST(request: Request) {
@@ -19,6 +20,8 @@ export async function POST(request: Request) {
     if (session.payment_status !== "paid" || session.mode !== "payment" || session.line_items?.data.length !== 1 || session.line_items.data[0].price?.id !== RESTORATION_PRICE || session.line_items.data[0].quantity !== 1) return new Response(null, { status: 409 });
     // Fetch the prediction ourselves; never trust output URLs in a notification.
     const result = await advanceRestoration(id);
-    return new Response(null, { status: result?.status === "processing" ? 503 : 204 });
+    const emailPending = result?.status === "complete" && !!result.email && restorationEmailConfigured()
+      && !result.emailDelivery?.sentAt && !result.emailDelivery?.needsAttention;
+    return new Response(null, { status: !result || result.status === "processing" || emailPending ? 503 : 204 });
   } catch { return new Response(null, { status: 503 }); }
 }
