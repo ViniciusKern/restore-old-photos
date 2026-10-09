@@ -29,7 +29,7 @@ test("photo upload is rejected before payment, without reading its body", async 
 
 test("readiness accepts Vercel Redis names and managed Blob authentication", () => {
   const env = { REPLICATE_API_TOKEN: "test", KV_REST_API_URL: "https://redis.example", KV_REST_API_TOKEN: "write-token", BLOB_STORE_ID: "store_example", VERCEL: "1" };
-  const api = load("app/_lib/restoration.ts", { "./restoration-email": { deliverRestorationEmail: async () => {} } }, { process: { env } });
+  const api = load("app/_lib/restoration.ts", { "./restoration-failure": load("app/_lib/restoration-failure.ts"), "./restoration-email": { deliverRestorationEmail: async () => {} } }, { process: { env } });
   assert.equal(api.restorationReady(), true);
   delete env.VERCEL;
   assert.equal(api.restorationReady(), false);
@@ -157,20 +157,30 @@ test("browser recovery is isolated by UUID and ignores the old global active che
 
 function restorationFixture({ failStart = false, deliverEmail = async () => {} } = {}) {
   const values = new Map(), files = new Map();
-  let starts = 0, completed = false;
+  const inputs = [];
+  let starts = 0, predictionStatus = "processing", predictionError = null, startStatus = 200, failResult = false, pollFailure = false, expireOnPut = false;
   const db = {
     get: async k => values.get(k) ? structuredClone(values.get(k)) : null,
     set: async (k, v, options) => {
       if (options?.nx && values.has(k)) return null;
       values.set(k, structuredClone(v)); return "OK";
     },
-    eval: async (_, keys, args) => { if (values.get(keys[0]) === args[0]) values.delete(keys[0]); },
+    eval: async (_, keys, args) => {
+      if (values.get(keys[0]) !== args[0]) return 0;
+      if (keys.length === 2) values.set(keys[1], JSON.parse(args[1]));
+      else values.delete(keys[0]);
+      return 1;
+    },
   };
   const api = load("app/_lib/restoration.ts", {
+    "./restoration-failure": load("app/_lib/restoration-failure.ts"),
     "./restoration-email": { deliverRestorationEmail: deliverEmail },
     "@upstash/redis": { Redis: { fromEnv: () => db } },
     "@vercel/blob": {
-      put: async (path, body) => { files.set(path, body); return { url: path }; },
+      put: async (path, body) => {
+        if (expireOnPut) values.set("restoration:order:lock", "new-owner");
+        files.set(path, body); return { url: path };
+      },
       get: async path => ({ statusCode: 200, stream: new Response(files.get(path)).body }),
     },
   }, {
@@ -178,16 +188,216 @@ function restorationFixture({ failStart = false, deliverEmail = async () => {} }
       if (url.endsWith("/restore-image/predictions")) {
         starts++;
         const body = JSON.parse(options.body);
-        assert.equal(body.input.input_image, "data:image/jpeg;base64,/9j/Y3JvcA==");
+        assert.match(body.input.input_image, /^data:image\/jpeg;base64,/);
+        inputs.push(body.input.input_image);
         if (failStart) throw new Error("Ambiguous network timeout");
-        return Response.json({ id: "prediction1", status: "starting" });
+        if (startStatus !== 200) return Response.json({ detail: "Provider rejected request" }, { status: startStatus });
+        return Response.json({ id: `prediction${starts}`, status: "starting" });
       }
-      if (url.includes("/predictions/")) return Response.json({ id: "prediction1", status: completed ? "succeeded" : "processing", output: "https://replicate.delivery/photo.png" });
+      if (url.includes("/predictions/")) {
+        if (pollFailure) throw new Error("Polling timeout");
+        return Response.json({ id: url.split("/").at(-1), status: predictionStatus, error: predictionError, output: "https://replicate.delivery/photo.png" });
+      }
+      if (failResult) throw new Error("Download unavailable");
       return new Response("restored", { headers: { "Content-Type": "image/png" } });
     },
   });
-  return { api, files, starts: () => starts, complete: () => { completed = true; } };
+  return { api, files, values, inputs, starts: () => starts, complete: () => { predictionStatus = "succeeded"; },
+    prediction: (status, error = null) => { predictionStatus = status; predictionError = error; },
+    startStatus: status => { startStatus = status; }, failResult: value => { failResult = value; }, pollFailure: value => { pollFailure = value; }, expireOnPut: () => { expireOnPut = true; } };
 }
+
+const testPhoto = (text = "crop") => new File([new Uint8Array([255, 216, 255]), text], "cropped.jpg", { type: "image/jpeg" });
+const recoveryRequest = (order, action = "retry") => ({ action, expectedAttemptId: order.attemptId || order.predictionId });
+
+test("failed predictions preserve diagnostics but expose only safe messages", async () => {
+  const f = restorationFixture();
+  await f.api.advanceRestoration("order", testPhoto());
+  f.prediction("failed", "E1000: trace https://secret.example/photo?token=private Bearer r8_secret");
+  const order = await f.api.advanceRestoration("order");
+  assert.equal(order.status, "failed");
+  assert.equal(order.failure.code, "E1000");
+  assert.ok(!order.failure.detail.includes("secret.example"));
+  assert.ok(!order.failure.detail.includes("r8_secret"));
+  const view = f.api.publicRestoration(order);
+  assert.equal(view.canRetry, true);
+  assert.equal(view.canReplace, true);
+  assert.equal(view.attemptsRemaining, 2);
+  assert.ok(!JSON.stringify(view).includes("trace"));
+  assert.ok(!JSON.stringify(view).includes("croppedImageUrl"));
+});
+
+test("retry, duplicate stale requests, and replacement share the same paid order and limit", async () => {
+  const f = restorationFixture();
+  await f.api.advanceRestoration("order", testPhoto());
+  f.prediction("failed", "E1000");
+  let failed = await f.api.advanceRestoration("order");
+  const firstRetry = recoveryRequest(failed);
+  await Promise.all([f.api.advanceRestoration("order", undefined, null, undefined, firstRetry), f.api.advanceRestoration("order", undefined, null, undefined, firstRetry)]);
+  assert.equal(f.starts(), 2);
+  assert.equal(f.inputs[0], f.inputs[1], "retry uses the stored photo");
+  failed = await f.api.advanceRestoration("order");
+  await f.api.advanceRestoration("order", undefined, null, undefined, firstRetry);
+  assert.equal(f.starts(), 2, "a stale request cannot retry a newer failure");
+  await f.api.advanceRestoration("order", testPhoto("replacement"), null, undefined, recoveryRequest(failed, "replace"));
+  assert.equal(f.starts(), 3);
+  assert.notEqual(f.inputs[0], f.inputs[2]);
+  failed = await f.api.advanceRestoration("order");
+  assert.equal(failed.history.length, 2);
+  assert.equal(failed.attempts, 3);
+  assert.equal(f.api.publicRestoration(failed).canRetry, false);
+  assert.equal(f.api.publicRestoration(failed).canReplace, false);
+  await f.api.advanceRestoration("order", testPhoto("fourth"), null, undefined, recoveryRequest(failed, "replace"));
+  await f.api.advanceRestoration("order", undefined, null, undefined, recoveryRequest(failed));
+  assert.equal(f.starts(), 3);
+});
+
+test("photo failures allow replacement only; configuration failures allow neither", async () => {
+  const f = restorationFixture();
+  await f.api.advanceRestoration("order", testPhoto());
+  f.prediction("failed", "NSFW safety checker blocked image");
+  let order = await f.api.advanceRestoration("order");
+  assert.equal(f.api.publicRestoration(order).canRetry, false);
+  assert.equal(f.api.publicRestoration(order).canReplace, true);
+  await f.api.advanceRestoration("order", undefined, null, undefined, recoveryRequest(order));
+  assert.equal(f.starts(), 1);
+  await f.api.advanceRestoration("order", testPhoto("new"), null, undefined, recoveryRequest(order, "replace"));
+  f.prediction("failed", "E8765");
+  order = await f.api.advanceRestoration("order");
+  assert.equal(f.api.publicRestoration(order).canRetry, false);
+  assert.equal(f.api.publicRestoration(order).canReplace, false);
+});
+
+test("canceled and aborted predictions are terminal and recoverable", async () => {
+  for (const status of ["canceled", "aborted"]) {
+    const f = restorationFixture();
+    await f.api.advanceRestoration("order", testPhoto());
+    f.prediction(status);
+    const order = await f.api.advanceRestoration("order");
+    assert.equal(order.status, "failed");
+    assert.equal(f.api.publicRestoration(order).canRetry, true);
+  }
+});
+
+test("explicit API rejection is recoverable but network and server ambiguity are not", async () => {
+  for (const status of [401, 402, 403, 404, 422, 429, 500, 503]) {
+    const f = restorationFixture();
+    f.startStatus(status);
+    const order = await f.api.advanceRestoration("order", testPhoto());
+    assert.equal(order.failure.httpStatus, status);
+    const view = f.api.publicRestoration(order);
+    assert.equal(view.canRetry, status === 429);
+    assert.equal(view.canReplace, status === 429);
+    assert.equal(order.status, status >= 500 ? "needs_attention" : "failed");
+    await f.api.advanceRestoration("order", undefined, null, undefined, recoveryRequest(order));
+    assert.equal(f.starts(), status === 429 ? 2 : 1);
+  }
+  const f = restorationFixture({ failStart: true });
+  const order = await f.api.advanceRestoration("order", testPhoto());
+  await f.api.advanceRestoration("order", testPhoto("new"), null, undefined, recoveryRequest(order, "replace"));
+  assert.equal(f.starts(), 1);
+});
+
+test("polling and result-download failures never run the model again", async () => {
+  const f = restorationFixture();
+  await f.api.advanceRestoration("order", testPhoto());
+  f.pollFailure(true);
+  await assert.rejects(f.api.advanceRestoration("order"), /Polling timeout/);
+  f.pollFailure(false);
+  f.complete();
+  f.failResult(true);
+  await assert.rejects(f.api.advanceRestoration("order"), /Download unavailable/);
+  f.failResult(false);
+  f.pollFailure(true);
+  const order = await f.api.advanceRestoration("order");
+  assert.equal(order.status, "complete", "saved output URL permits recovery without refetching the prediction");
+  assert.equal(order.attempts, 1);
+  assert.equal(f.starts(), 1);
+});
+
+test("legacy failed orders can recover with their existing prediction ID", async () => {
+  const f = restorationFixture();
+  f.files.set("old-photo", testPhoto());
+  f.values.set("restoration:order", { status: "failed", predictionId: "legacy", croppedImageUrl: "old-photo", email: null });
+  const view = f.api.publicRestoration(await f.api.readOrder("order"));
+  assert.equal(view.attemptsRemaining, 2);
+  assert.equal(view.attemptId, "legacy");
+  const order = await f.api.advanceRestoration("order", undefined, null, undefined, { action: "retry", expectedAttemptId: "legacy" });
+  assert.equal(order.attempts, 2);
+  assert.equal(f.starts(), 1);
+});
+
+test("recovery requests cannot create a missing order", async () => {
+  const f = restorationFixture();
+  assert.equal(await f.api.advanceRestoration("missing", testPhoto(), null, undefined, { action: "replace", expectedAttemptId: "old" }), null);
+  assert.equal(f.files.size, 0);
+  assert.equal(f.starts(), 0);
+});
+
+test("expired lock cannot overwrite the order or start another prediction", async () => {
+  const f = restorationFixture();
+  await f.api.advanceRestoration("order", testPhoto());
+  f.prediction("failed", "E1000");
+  const failed = await f.api.advanceRestoration("order");
+  f.expireOnPut();
+  await assert.rejects(f.api.advanceRestoration("order", testPhoto("new"), null, undefined, recoveryRequest(failed, "replace")), /lock expired/);
+  assert.equal((await f.api.readOrder("order")).attemptId, failed.attemptId);
+  assert.equal(f.values.get("restoration:order:lock"), "new-owner", "never release another owner's lock");
+  assert.equal(f.starts(), 1);
+});
+
+test("recovery endpoint validates action, photo and ownership before advancing", async () => {
+  let paid = true, authorized = true, advanced = 0, args;
+  const route = load("app/api/restorations/[id]/route.ts", {
+    "@/app/_lib/paid-session": { authorizedSession: async () => authorized ? { payment_status: paid ? "paid" : "unpaid", customer_details: { email: "customer@example.com" }, client_reference_id: "uuid" } : null },
+    "@/app/_lib/restoration": { restorationReady: () => true, publicRestoration: order => order,
+      advanceRestoration: async (...input) => { advanced++; args = input; return { status: "processing" }; } },
+  });
+  const request = (action = "retry", photo) => {
+    const body = new FormData(); body.set("action", action); body.set("expected_attempt_id", "attempt1");
+    if (photo) body.set("cropped_image", photo);
+    return new Request("http://localhost", { method: "POST", body, headers: { Authorization: "Bearer secret" } });
+  };
+  const context = { params: Promise.resolve({ id: "order" }) };
+  assert.equal((await route.POST(request("other"), context)).status, 400);
+  assert.equal((await route.POST(request("replace"), context)).status, 400);
+  assert.equal((await route.POST(request("retry", testPhoto()), context)).status, 400);
+  assert.equal(advanced, 0);
+  assert.equal((await route.POST(request(), context)).status, 200);
+  assert.equal(args[4].expectedAttemptId, "attempt1");
+  assert.equal(args[4].action, "retry");
+  assert.equal((await route.POST(request("replace", testPhoto()), context)).status, 200);
+  assert.equal(args[4].action, "replace");
+  assert.ok(args[1] instanceof File);
+  paid = false;
+  assert.equal((await route.POST(request(), context)).status, 409);
+  authorized = false;
+  assert.equal((await route.POST(request(), context)).status, 404);
+  assert.equal(advanced, 2);
+});
+
+test("failure classification handles memory limits, unreadable files, unknown errors and limits", () => {
+  const { classifyRestorationFailure: classify, restorationRecovery: recovery } = load("app/_lib/restoration-failure.ts");
+  for (const code of ["E1000", "E6716", "E8367", "E9825"]) assert.equal(classify(code).kind, "temporary");
+  assert.equal(classify("E1001").kind, "photo");
+  assert.equal(classify("Cannot decode image").kind, "photo");
+  assert.equal(classify("E4875").kind, "configuration");
+  assert.equal(classify("E9243").kind, "unknown");
+  assert.equal(recovery(classify("E1000"), 3).canReplace, false);
+  assert.equal(recovery(classify("E1000"), 3).canRetry, false);
+});
+
+test("delayed webhook from an older attempt is acknowledged without advancing the new attempt", async () => {
+  let advanced = 0;
+  const route = load("app/api/replicate/webhook/route.ts", {
+    "@/app/_lib/replicate-signature": { verifyReplicateWebhook: () => true },
+    "@/app/_lib/restoration": { predictionOrder: async () => "order", readOrder: async () => ({ predictionId: "new" }), advanceRestoration: () => { advanced++; } },
+    "@/app/_lib/paid-session": {}, "@/app/_lib/restoration-email": {},
+  }, { process: { env: { REPLICATE_WEBHOOK_SIGNING_SECRET: "test" } } });
+  const result = await route.POST(new Request("https://example.com", { method: "POST", body: JSON.stringify({ id: "old" }) }));
+  assert.equal(result.status, 204);
+  assert.equal(advanced, 0);
+});
 
 test("duplicate and concurrent requests start only one restoration using the cropped JPEG", async () => {
   const f = restorationFixture();

@@ -20,7 +20,25 @@ You can start editing the page by modifying `app/page.tsx`. The page auto-update
 
 This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
 
-## Learn More
+## Tests
+
+Use Node.js 20.9+ and the project's pnpm version.
+
+```bash
+pnpm test            # Frontend and backend
+pnpm test:frontend   # Jest + React Testing Library (jsdom)
+pnpm test:backend    # Node.js backend regression tests
+pnpm test:watch      # Frontend watch mode
+pnpm test:coverage   # Frontend coverage report
+```
+
+Frontend tests live in `tests/frontend`. They render real React components and
+exercise uploads, crop controls, checkout and restoration recovery. Network,
+browser storage, camera, canvas and Stripe SDK boundaries are mocked as needed;
+these tests never submit payments or call external services. They are component
+tests, not browser end-to-end or visual layout tests.
+
+## Resources
 
 To learn more about Next.js, take a look at the following resources:
 

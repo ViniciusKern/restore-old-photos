@@ -4,7 +4,6 @@ import Image from "next/image";
 import {
   ArrowRight,
   Camera,
-  Check,
   Crop,
   ImagePlus,
   LoaderCircle,
@@ -34,7 +33,7 @@ const standardCropQuad: CropQuad = {
 type FlowStep = "select" | "camera" | "crop" | "checkout";
 type CameraStatus = "idle" | "starting" | "ready" | "error";
 
-export function RestorePhotoFlow() {
+export function RestorePhotoFlow({ onPrepared, onCancel, onStepChange }: { onPrepared?: (photo: Blob) => Promise<void>; onCancel?: () => void; onStepChange?: (step: FlowStep) => void } = {}) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraFallbackInputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -49,14 +48,17 @@ export function RestorePhotoFlow() {
   const [isPreparing, setIsPreparing] = useState(false);
   const [prepareError, setPrepareError] = useState("");
 
+  useEffect(() => { onStepChange?.(step); }, [step, onStepChange]);
+
   async function prepareCheckout() {
     if (!imageSrc || isPreparing) return;
     setIsPreparing(true);
     setPrepareError("");
     try {
       const { cropPhoto } = await import("./crop-photo");
-      setCroppedPhoto(await cropPhoto(imageSrc, cropQuad));
-      setStep("checkout");
+      const photo = await cropPhoto(imageSrc, cropQuad);
+      if (onPrepared) await onPrepared(photo);
+      else { setCroppedPhoto(photo); setStep("checkout"); }
     } catch (error) {
       setPrepareError(
         error instanceof Error
@@ -205,8 +207,9 @@ export function RestorePhotoFlow() {
     }, 230);
   }
 
+  const Container = onPrepared ? "div" : "main";
   return (
-    <main className="min-h-screen bg-[#f8f9fa] text-[#242729]">
+    <Container className={onPrepared ? "w-full text-[#242729]" : "min-h-screen bg-[#f8f9fa] text-[#242729]"}>
       <input
         accept="image/*"
         className="hidden"
@@ -223,8 +226,10 @@ export function RestorePhotoFlow() {
         type="file"
       />
 
-      <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col px-4 py-4 sm:px-6 lg:px-8">
-        <FlowHeader step={step} />
+      <div className={`mx-auto flex w-full max-w-7xl flex-col ${onPrepared ? "" : "min-h-screen px-4 py-4 sm:px-6 lg:px-8"}`}>
+        {!onPrepared ? <FlowHeader step={step} /> : null}
+        {onCancel ? <button className="button-quiet mt-6 self-start" type="button" disabled={isPreparing} onClick={onCancel}>Cancel photo change</button> : null}
+        {onPrepared ? <p className="mt-4 text-sm text-[#677078]">This photo will use your existing payment. You will not be charged again.</p> : null}
 
         {step === "select" ? (
           <SelectPhotoStep
@@ -250,6 +255,7 @@ export function RestorePhotoFlow() {
             imageSrc={imageSrc}
             isRotating={isRotating}
             isPreparing={isPreparing}
+            continueLabel={onPrepared ? "Restore photo" : "Continue"}
             onCamera={takeAnotherPhoto}
             onContinue={prepareCheckout}
             onCropChange={(quad) => {
@@ -271,7 +277,7 @@ export function RestorePhotoFlow() {
           />
         ) : null}
       </div>
-    </main>
+    </Container>
   );
 }
 
@@ -452,6 +458,7 @@ function CropStep({
   imageSrc,
   isRotating,
   isPreparing,
+  continueLabel,
   onCamera,
   onContinue,
   onCropChange,
@@ -462,6 +469,7 @@ function CropStep({
   imageSrc: string;
   isRotating: boolean;
   isPreparing: boolean;
+  continueLabel: string;
   onCamera: () => void;
   onContinue: () => void;
   onCropChange: (cropQuad: CropQuad) => void;
@@ -516,7 +524,7 @@ function CropStep({
             onClick={onContinue}
             type="button"
           >
-            {isPreparing ? "Preparing photo..." : "Continue"}
+            {isPreparing ? "Preparing photo..." : continueLabel}
             {isPreparing ? (
               <LoaderCircle className="animate-spin" aria-hidden="true" />
             ) : (

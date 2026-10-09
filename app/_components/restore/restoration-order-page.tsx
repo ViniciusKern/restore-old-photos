@@ -12,6 +12,7 @@ export function RestorationOrderPage({ restorationId }: { restorationId: string 
   const [status, setStatus] = useState<"loading" | "pending" | "approved" | "missing" | "error">("loading");
   const [error, setError] = useState("");
   const [attempt, setAttempt] = useState(0);
+  const [step, setStep] = useState<"select" | "camera" | "crop" | "checkout" | "result">("result");
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout>;
@@ -52,8 +53,8 @@ export function RestorationOrderPage({ restorationId }: { restorationId: string 
   return (
     <main className="min-h-screen bg-[#f8f9fa] text-[#242729]">
       <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col px-4 py-4 sm:px-6 lg:px-8">
-        <FlowHeader step="result" />
-        {status === "approved" && order ? <RestorationResult id={order.sessionId} restorationId={restorationId} secret={order.clientSecret} croppedPhoto={order.croppedPhoto} /> : (
+        <FlowHeader step={step} />
+        {status === "approved" && order ? <RestorationResult id={order.sessionId} restorationId={restorationId} secret={order.clientSecret} croppedPhoto={order.croppedPhoto} onStepChange={setStep} /> : (
           <section className="restore-panel-in mx-auto w-full max-w-2xl py-10">
             <h1 className="text-3xl font-semibold">{status === "missing" ? "Restoration unavailable" : status === "error" ? "Let's check your payment" : "Confirming your payment"}</h1>
             {status === "loading" || status === "pending" ? <p className="mt-6 flex items-center gap-3 text-sm text-[#677078]" role="status"><LoaderCircle className="h-5 w-5 animate-spin" aria-hidden="true" /> Waiting for payment confirmation...</p> : null}

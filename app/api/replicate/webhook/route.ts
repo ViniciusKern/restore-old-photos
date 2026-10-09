@@ -15,7 +15,9 @@ export async function POST(request: Request) {
     const id = await predictionOrder(prediction.id);
     if (!id) return new Response(null, { status: 503 });
     const order = await readOrder(id);
-    if (!order || order.predictionId !== prediction.id) return new Response(null, { status: 503 });
+    if (!order) return new Response(null, { status: 503 });
+    // A delayed notification for an older attempt must never advance the current one.
+    if (order.predictionId !== prediction.id) return new Response(null, { status: 204 });
     const session = await stripeClient().checkout.sessions.retrieve(id, { expand: ["line_items"] });
     if (session.payment_status !== "paid" || session.mode !== "payment" || session.line_items?.data.length !== 1 || session.line_items.data[0].price?.id !== RESTORATION_PRICE || session.line_items.data[0].quantity !== 1) return new Response(null, { status: 409 });
     // Fetch the prediction ourselves; never trust output URLs in a notification.
